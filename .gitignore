@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# Extra added files/folders
+workflow.md
+proj_structure.md
+rag_env/
+data/
+logs/
+retriever_test.py
+test.py
+test.ipynb
+notebooks/
