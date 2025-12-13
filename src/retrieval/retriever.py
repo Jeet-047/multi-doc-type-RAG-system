@@ -42,6 +42,7 @@ class RerankMMRRetriever:
         rerank_pct: float | None = None,
         mmr_pct: float | None = None,
         lambda_mult: float = 0.5,
+        min_chunk: int | None = None,
     ) -> List[Document]:
         """
         Run vector search -> rerank -> MMR over the reranked set.
@@ -52,6 +53,7 @@ class RerankMMRRetriever:
             rerank_pct: Percentage of initial_k to keep after reranking.
             mmr_pct: Percentage of rerank_k to keep after MMR.
             lambda_mult: Trade-off for MMR (1.0 = purely relevance).
+            min_chunk: If total chunks <= min_chunk, skip rerank/MMR and return all.
         """
         try:
             total_docs = count_documents(self.vector_store)
@@ -60,6 +62,15 @@ class RerankMMRRetriever:
             if total_docs == 0:
                 logging.warning("Vector store is empty. No documents to retrieve.")
                 return []
+            
+            # Short-circuit for small corpora
+            if min_chunk is not None and total_docs <= min_chunk:
+                logging.info(
+                    "Total documents (%d) <= min_chunk (%d). Skipping rerank/MMR.",
+                    total_docs,
+                    min_chunk,
+                )
+                return self.vector_store.similarity_search(query, k=total_docs)
             
             initial_k_final = compute_k(
                 total=total_docs,

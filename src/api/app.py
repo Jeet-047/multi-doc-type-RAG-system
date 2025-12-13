@@ -3,7 +3,7 @@ import shutil
 import tempfile
 from enum import Enum
 from hashlib import md5
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +29,20 @@ class QueryRequest(BaseModel):
     query: str
 
 
+class Source(BaseModel):
+    name: str
+    path: str
+    page_info: str
+    snippet: str
+    chunk: str | None = None
+    highlighted_chunk: str | None = None
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[Source]
+
+
 class ProcessingStatus(str, Enum):
     IDLE = "idle"
     PROCESSING = "processing"
@@ -48,6 +62,8 @@ class PipelineState:
         self.tmp_dir = tempfile.mkdtemp(prefix="rag_uploads_")
         self.status = ProcessingStatus.IDLE
         self.error_message: Optional[str] = None
+        self.loaded_documents: List[Dict[str, str]] = []
+        self.documents_config: List[dict] = []
 
     def _fingerprint(self, docs: List[dict]) -> str:
         """
@@ -128,9 +144,20 @@ class PipelineState:
 
             # Override documents config dynamically
             self.pipeline.config["documents"] = docs
+            self.documents_config = docs
             self.pipeline.prepare_vector_store()
             self.current_fingerprint = new_fp
             self.status = ProcessingStatus.READY
+            
+            # Update loaded documents list for status endpoint
+            self.loaded_documents = [
+                {
+                    "name": os.path.basename(doc.get("path", "unknown")),
+                    "path": doc.get("path", "unknown")
+                }
+                for doc in docs
+            ]
+            
             logging.info("Vector store prepared successfully for %d document(s).", len(docs))
         except Exception as e:
             self.status = ProcessingStatus.ERROR
@@ -188,6 +215,7 @@ def get_status() -> dict:
     """Get the current processing status."""
     status_info = {
         "status": state.status.value,
+        "loaded_documents": state.loaded_documents,
     }
     if state.status == ProcessingStatus.ERROR:
         status_info["error"] = state.error_message
@@ -198,8 +226,8 @@ def get_status() -> dict:
     return status_info
 
 
-@app.post("/query")
-def query(payload: QueryRequest) -> dict:
+@app.post("/query", response_model=QueryResponse)
+def query(payload: QueryRequest) -> QueryResponse:
     try:
         if state.status != ProcessingStatus.READY:
             if state.status == ProcessingStatus.PROCESSING:
@@ -218,10 +246,91 @@ def query(payload: QueryRequest) -> dict:
                     detail="No documents loaded. Please load documents first using /load endpoint.",
                 )
         
-        answer = state.pipeline.answer(payload.query)
-        return {"answer": answer}
+        # Get answer and sources from pipeline
+        result = state.pipeline.answer_with_sources(payload.query)
+        
+        # Convert sources to the expected format
+        sources = [
+            Source(
+                name=os.path.basename(src.get("path", "unknown")),
+                path=src.get("path", "unknown"),
+                page_info=src.get("page_info", "N/A"),
+                snippet=src.get("snippet", "")[:200] + "..." if len(src.get("snippet", "")) > 200 else src.get("snippet", ""),
+                chunk=src.get("chunk"),
+                highlighted_chunk=src.get("highlighted_chunk"),
+            )
+            for src in result.get("sources", [])
+        ]
+        
+        return QueryResponse(
+            answer=result.get("answer", ""),
+            sources=sources
+        )
     except HTTPException:
         raise
     except Exception as e:
         logging.exception("Query failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cleanup")
+def cleanup() -> dict:
+    """Clear the indexed context."""
+    try:
+        state.pipeline.vector_store = None
+        state.pipeline.retriever = None
+        state.current_fingerprint = None
+        state.documents_config = []
+        state.loaded_documents = []
+        state.status = ProcessingStatus.IDLE
+        state.error_message = None
+        
+        logging.info("Pipeline cleaned up successfully")
+        return {"message": "All indexed documents and context have been cleared."}
+    except Exception as e:
+        logging.exception("Cleanup failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CleanupSelectedRequest(BaseModel):
+    paths: List[str]
+
+
+@app.post("/cleanup_selected")
+def cleanup_selected(req: CleanupSelectedRequest) -> dict:
+    """Remove selected indexed sources and rebuild the vector store."""
+    try:
+        if not state.documents_config:
+            raise HTTPException(status_code=400, detail="No documents indexed to clear.")
+
+        remaining_docs = [
+            doc for doc in state.documents_config
+            if doc.get("path") not in set(req.paths or [])
+        ]
+
+        # If nothing remains, fallback to full cleanup
+        if not remaining_docs:
+            cleanup_resp = cleanup()
+            return {
+                "message": "Selected sources cleared. No documents remain.",
+                "status": state.status,
+                "loaded_documents": state.loaded_documents,
+                **cleanup_resp,
+            }
+
+        state.pipeline.vector_store = None
+        state.pipeline.retriever = None
+        state.current_fingerprint = None
+
+        state._process_documents(remaining_docs)
+
+        return {
+            "message": "Selected sources cleared and context rebuilt.",
+            "status": state.status,
+            "loaded_documents": state.loaded_documents,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Partial cleanup failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

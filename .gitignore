@@ -216,4 +216,5 @@ logs/
 retriever_test.py
 test.py
 test.ipynb
-notebooks/
+notebook/
+ui_app.py

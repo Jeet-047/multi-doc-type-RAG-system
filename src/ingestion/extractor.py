@@ -42,8 +42,13 @@ class DocumentExtractor:
                 # Add the determined doc_type to this metadata
                 metadata['doc_type'] = doc_type
                 # Ensure source, page, and section are present (or default)
-                # For 'source', prefer existing source from metadata, otherwise use doc_path
-                metadata['source'] = current_doc_info.get('source', doc_path)
+                # For 'source', normalize to show only filename, not full path
+                source_path = current_doc_info.get('source', doc_path)
+                if source_path and not source_path.startswith(('http://', 'https://')):
+                    # Extract just the filename from the path
+                    metadata['source'] = os.path.basename(source_path)
+                else:
+                    metadata['source'] = source_path  # Keep URLs as-is
                 # For 'page', prefer existing page from metadata, otherwise use index + 1
                 metadata['page'] = current_doc_info.get('page', i) + 1
                 # For 'section', use existing section from metadata, otherwise 'N/A'

@@ -1,7 +1,6 @@
 import os
 import time
 import html
-import logging
 import requests
 import streamlit as st
 from typing import Dict, Any
@@ -342,11 +341,10 @@ def api_load(files, url: str, progress_placeholder) -> dict:
 
 # MODIFIED: Now returns the structured dictionary from the backend
 def api_query(query: str) -> Dict[str, Any]:
-    # Increased timeout for Map-Reduce operations which can take longer
     resp = requests.post(
         f"{get_backend_url()}/query",
         json={"query": query},
-        timeout=300,  # 5 minutes for Map-Reduce operations
+        timeout=180,
     )
     resp.raise_for_status()
     # Return the full structured response: {"answer": str, "sources": list}
@@ -491,11 +489,10 @@ def sidebar():
     # 4. Cleanup Button
     if st.sidebar.button("Clear Indexed Documents (Cleanup)", type="secondary", use_container_width=True):
         try:
-            with st.status("🧹 Clearing RAG pipeline and files...", expanded=True) as cleanup_status:
+            with st.spinner("Clearing RAG pipeline and files..."):
                 cleanup_resp = api_cleanup()
                 st.session_state["rag_status"] = {"status": "idle", "loaded_documents": []}
                 st.session_state["messages"] = [] # Clear chat history on cleanup
-                cleanup_status.update(label="✅ Cleanup complete!", state="complete")
                 st.success(cleanup_resp["message"])
                 st.rerun() 
         except Exception as e:
@@ -614,15 +611,10 @@ def chat_area():
         st.session_state["messages"].append({"role": "user", "content": query.strip()})
         
         # Get assistant response immediately (before rerun)
-        # with st.status("🔄 Retrieving and generating answer...", expanded=True) as status:
         with st.spinner("Retrieving and generating answer..."):
             try:
                 # api_query returns the full structured dictionary
                 result = api_query(query.strip())
-                
-                # Log the result for debugging
-                logging.info("Received result from API: answer length=%d, sources count=%d", 
-                           len(result.get("answer", "")), len(result.get("sources", [])))
                 
                 # Validate result structure
                 if not isinstance(result, dict):
@@ -635,21 +627,9 @@ def chat_area():
                 if "sources" not in result:
                     result["sources"] = []
                 
-                # Validate answer is not empty
-                if not result.get("answer", "").strip():
-                    raise ValueError("Received empty answer from backend")
-                
                 # Add the full structured result to history
                 st.session_state["messages"].append({"role": "assistant", "content": result})
-                logging.info("Successfully added assistant response to chat history")
                 
-            except requests.exceptions.Timeout:
-                error_message = "Query timed out. The operation took too long. Try rephrasing your question or check if the backend is responsive."
-                st.error(error_message)
-                # Remove the user message if query failed
-                if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "user":
-                    st.session_state["messages"].pop()
-                    
             except requests.exceptions.HTTPError as e:
                 error_detail = "Unknown error"
                 try:
@@ -667,7 +647,6 @@ def chat_area():
             except Exception as e:
                 error_message = f"Query failed: {str(e)}"
                 st.error(error_message)
-                logging.exception("Unexpected error in query: %s", e)
                 # Remove the user message if query failed
                 if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "user":
                     st.session_state["messages"].pop()

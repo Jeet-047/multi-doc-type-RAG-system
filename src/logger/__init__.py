@@ -29,13 +29,43 @@ def configure_logger():
         # Define formatter
         formatter = logging.Formatter("[ %(asctime)s ] %(name)s - %(levelname)s - %(message)s")
 
-        # File handler with rotation
-        file_handler = RotatingFileHandler(log_file_path, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT)
+        # File handler with rotation (UTF-8 encoding for Unicode support)
+        file_handler = RotatingFileHandler(
+            log_file_path, 
+            maxBytes=MAX_LOG_SIZE, 
+            backupCount=BACKUP_COUNT,
+            encoding='utf-8'
+        )
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.DEBUG)
         
-        # Console handler
-        console_handler = logging.StreamHandler()
+        # Console handler with Unicode error handling
+        class SafeStreamHandler(logging.StreamHandler):
+            """StreamHandler that safely handles Unicode encoding errors on Windows."""
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    stream = self.stream
+                    # Try to write normally first
+                    try:
+                        stream.write(msg + self.terminator)
+                        self.flush()
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        # If encoding fails, sanitize the message by replacing problematic characters
+                        # This ensures Windows console (cp1252) can handle the output
+                        safe_msg = msg.encode('ascii', errors='replace').decode('ascii')
+                        try:
+                            stream.write(safe_msg + self.terminator)
+                            self.flush()
+                        except Exception:
+                            # Last resort: write a simplified message
+                            safe_msg_simple = f"[Log message contains non-ASCII characters: {record.levelname}]"
+                            stream.write(safe_msg_simple + self.terminator)
+                            self.flush()
+                except Exception:
+                    self.handleError(record)
+        
+        console_handler = SafeStreamHandler()
         console_handler.setFormatter(formatter)
         console_handler.setLevel(logging.INFO)
         

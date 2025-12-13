@@ -1,13 +1,12 @@
 import math
 import os
+import re
 import sys
+from typing import Dict, List, Sequence
 
-import numpy as np
-import dill  # type: ignore
 import yaml
-import nltk
 import tiktoken
-from pandas import DataFrame
+from langchain_core.documents import Document
 
 from src.exception import MyException
 from src.logger import logging
@@ -25,25 +24,6 @@ def num_tokens_from_string(text: str, model_name: str = "cl100k_base") -> int:
     num_tokens = len(encoding.encode(text))
     return num_tokens
 
-def download_nltk_package_if_needed(resource_name, path_prefix):
-    """Checks for a specific NLTK resource using the correct path prefix."""
-    try:
-        # Check the specific expected location
-        nltk.data.find(f'{path_prefix}/{resource_name}')
-        print(f"'{resource_name}' found in {path_prefix}. Skipping download.")
-    except LookupError:
-        print(f"'{resource_name}' not found. Downloading...")
-        nltk.download(resource_name, quiet=True)
-        print("Download complete.")
-
-def is_model_present(model_path) -> bool:
-    """Function that checks any model exists or not"""
-    try:
-        if os.path.exists(model_path):
-            return True
-    except MyException as e:
-        print(e)
-        return False
 
 def read_yaml_file(file_path: str) -> dict:
     try:
@@ -54,14 +34,17 @@ def read_yaml_file(file_path: str) -> dict:
         raise MyException(e, sys) from e
 
 
-def write_yaml_file(file_path: str, content: object, replace: bool = False) -> None:
+def load_configs(config_dir: str) -> Dict:
+    """Load all configuration files from the specified directory."""
     try:
-        if replace:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "w") as file:
-            yaml.dump(content, file)
+        configs = {}
+        for name in ["ingestion", "chunking", "retrieval", "generation", "pipeline"]:
+            path = os.path.join(config_dir, f"{name}.yaml")
+            if os.path.exists(path):
+                configs.update(read_yaml_file(path) or {})
+            else:
+                logging.warning("Config file missing: %s", path)
+        return configs
     except Exception as e:
         raise MyException(e, sys) from e
 
@@ -103,57 +86,92 @@ def count_documents(vector_store) -> int:
     return 0
 
 
-def load_object(file_path: str) -> object:
+# ----------------------------
+# RAG Pipeline Helper Functions
+# ----------------------------
+
+def build_context(docs: Sequence[Document], include_citations: bool = False) -> str:
+    """Concatenate documents into a single context string."""
+    # Note: include_citations parameter kept for API compatibility but not implemented
+    # Citations are handled separately via extract_sources()
+    parts = [doc.page_content for doc in docs]
+    return "\n\n".join(parts)
+
+
+def _build_highlight_pattern(answer_text: str) -> re.Pattern | None:
     """
-    Returns model/object from project directory.
-    file_path: str location of file to load
-    return: Model/Obj
+    Build a regex pattern for highlightable keywords from the answer text.
+    Keeps unique words longer than 3 characters.
     """
-    try:
-        with open(file_path, "rb") as file_obj:
-            obj = dill.load(file_obj)
-        return obj
-    except Exception as e:
-        raise MyException(e, sys) from e
+    if not answer_text:
+        return None
+    words = re.findall(r"\b\w+\b", answer_text.lower())
+    keywords = [w for w in words if len(w) > 3]
+    deduped = list(dict.fromkeys(keywords))
+    if not deduped:
+        return None
+    escaped = [re.escape(w) for w in deduped[:50]]
+    return re.compile(r"\b(" + "|".join(escaped) + r")\b", flags=re.IGNORECASE)
 
-def save_numpy_array_data(file_path: str, array: np.array):
+
+def highlight_overlap(text: str, answer_text: str) -> str:
     """
-    Save numpy array data to file
-    file_path: str location of file to save
-    array: np.array data to save
+    Highlight sentences (not individual words) from the source chunk that overlap
+    with words in the answer. Returns HTML with <mark> wrapped sentences.
     """
-    try:
-        dir_path = os.path.dirname(file_path)
-        os.makedirs(dir_path, exist_ok=True)
-        with open(file_path, 'wb') as file_obj:
-            np.save(file_obj, array)
-    except Exception as e:
-        raise MyException(e, sys) from e
+    pattern = _build_highlight_pattern(answer_text)
+    if not pattern:
+        return text
+
+    # Split into sentences while retaining punctuation.
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    highlighted = []
+    for sent in sentences:
+        if pattern.search(sent):
+            highlighted.append(f"<mark>{sent}</mark>")
+        else:
+            highlighted.append(sent)
+    return " ".join(highlighted)
 
 
-def load_numpy_array_data(file_path: str) -> np.array:
+def extract_sources(docs: Sequence[Document], answer_text: str | None = None) -> List[Dict[str, str]]:
     """
-    load numpy array data from file
-    file_path: str location of file to load
-    return: np.array data loaded
+    Extract source information from documents with deduplication.
+    Returns filename-only paths and includes the full chunk plus a highlighted version.
     """
-    try:
-        with open(file_path, 'rb') as file_obj:
-            return np.load(file_obj)
-    except Exception as e:
-        raise MyException(e, sys) from e
-
-
-def save_object(file_path: str, obj: object) -> None:
-    logging.info("Entered the save_object method of utils")
-
-    try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "wb") as file_obj:
-            dill.dump(obj, file_obj)
-
-        logging.info("Exited the save_object method of utils")
-
-    except Exception as e:
-        raise MyException(e, sys) from e
+    sources = []
+    seen_sources = set()
+    
+    for doc in docs:
+        meta = doc.metadata or {}
+        source_path = meta.get("source", "unknown")
+        page = meta.get("page", "N/A")
+        
+        # Normalize path to show only filename, not full path
+        if source_path and source_path != "unknown":
+            normalized_path = os.path.basename(source_path)
+        else:
+            normalized_path = "unknown"
+        
+        # Create a unique key for deduplication
+        source_key = f"{normalized_path}|{page}"
+        
+        if source_key not in seen_sources:
+            seen_sources.add(source_key)
+            
+            # Format page info
+            page_info = f"Page {page}" if page != "N/A" else "N/A"
+            
+            chunk_text = doc.page_content
+            highlighted_chunk = highlight_overlap(chunk_text, answer_text) if answer_text else chunk_text
+            
+            sources.append({
+                "path": normalized_path,
+                "page_info": page_info,
+                "snippet": chunk_text,
+                "chunk": chunk_text,
+                "highlighted_chunk": highlighted_chunk,
+            })
+    
+    return sources
 
