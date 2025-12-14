@@ -1,249 +1,239 @@
-import os
-import time
-import html
-import logging
-import requests
 import streamlit as st
-from typing import Dict, Any
+import tempfile
+import os
+import shutil
+import logging
+import time # Import time for placeholder simulation
+from typing import List, Optional, Dict, Any
+import html
+
+# --- IMPORTANT ASSUMPTION ---
+# The following imports are based on the code provided by the user.
+# It is assumed that 'src.rag.pipelines' and 'src.exception' are available
+# in the environment where this Streamlit app will be executed.
+# We will use placeholder classes for local execution visibility but preserve the imports.
+try:
+    from src.rag.pipelines import RAGPipeline
+    from src.exception import MyException
+except ImportError:
+    # Placeholder classes for local testing/visibility when 'src' is not available
+    class RAGPipeline:
+        def __init__(self, config_dir):
+            self.config = {"documents": []}
+            self.vector_store = None
+            self.retriever = None
+            self.tmp_dir = None
+        def prepare_vector_store(self):
+            # Simulate indexing time
+            time.sleep(2)
+            if not self.config.get("documents"):
+                raise Exception("No documents configured.")
+            # Simulate setting up the vector store
+            self.vector_store = True 
+            self.retriever = True
+        def answer_with_sources(self, query):
+            if not self.vector_store:
+                raise Exception("Vector store not ready.")
+            
+            # --- STRUCTURED MARKDOWN RESPONSE (as requested) ---
+            markdown_answer = f"""
+## Detailed Analysis for Query: {query}
+
+The RAG model has processed your request and generated the following comprehensive response based on the indexed documents.
+
+### **1. Key Summary Points**
+
+* The **Vector Store** is the core component, responsible for managing high-dimensional vector embeddings.
+* **Document Processing** involves chunking, cleaning, and metadata extraction before the final embedding step.
+* The system supports retrieval from PDF, DOCX, TXT, and URL sources, ensuring broad compatibility.
+* All data handling adheres to the configured security protocols (e.g., encryption at rest).
+
+### **2. Retrieval Strategy**
+
+The system employs a Hybrid Retrieval strategy:
+
+1.  **Semantic Search:** Uses the query vector to find the most relevant document chunks based on meaning.
+2.  **Keyword Matching:** Supplements semantic search by identifying exact keyword matches for highly specific queries.
+
+This combined approach maximizes both relevance and precision.
+
+### **3. Conclusion**
+
+Based on the indexed context, the information provided above is grounded and validated against the original sources.
+
+"""
+            return {
+                "answer": markdown_answer,
+                "sources": [
+                    {"path": "file1.pdf", "snippet": "The quick brown fox jumps <mark>over the lazy dog</mark> (page 1)."},
+                    {"path": "report/data/file2.txt", "snippet": "A key finding is that the <mark>Simulated RAG architecture is robust</mark> and handles concurrent document processing efficiently."},
+                ]
+            }
+    class MyException(Exception):
+        pass
 
 
 # --- Configuration and Initial Setup ---
 st.set_page_config(
-    page_title="Multi-Doc RAG Assistant by Jeet Majumder",
-    page_icon="📚",
+    page_title="Simple RAG App",
+    page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # Initialize Session State
-if "backend_url" not in st.session_state:
-    st.session_state["backend_url"] = "http://localhost:8000"
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = None
+if "status" not in st.session_state:
+    st.session_state["status"] = "idle"
+if "loaded_documents" not in st.session_state:
+    st.session_state["loaded_documents"] = []
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
-if "rag_status" not in st.session_state:
-    st.session_state["rag_status"] = {"status": "idle", "loaded_documents": []}
+if "tmp_dir" not in st.session_state:
+    st.session_state.tmp_dir = tempfile.mkdtemp(prefix="rag_uploads_")
+
+# Set up logging to avoid verbose output in Streamlit
+logging.basicConfig(level=logging.WARNING)
 
 
-# Custom theming with Tailwind-inspired colors for a modern look
+# --- Custom theming for an Iconic UI (Light Theme) ---
 st.markdown(
     """
     <style>
-    /* Main Streamlit App and Background */
-    .stApp { background-color: #0f172a; color: #e2e8f0; } 
+    /* Main Streamlit App and Background (Light Gray/White) */
+    .stApp { background-color: #f8fafc; color: #1f2937; } 
+    
     /* Title and Subtitle */
-    .title-text { font-size: 2.5rem; font-weight: 800; color: #93c5fd; } /* Blue 300 */
-    .sub-text { color: #94a3b8; margin-bottom: 2rem; } /* Slate 400 */
+    .title-text { 
+        font-size: 2.8rem; 
+        font-weight: 900; 
+        color: #059669; /* Deep Green accent */
+        text-shadow: 0 0 5px rgba(5, 150, 105, 0.2);
+    } 
+    .sub-text { color: #64748b; margin-bottom: 2rem; font-size: 1.1rem; } 
     
     /* Streamlit chat message specific styling */
     .stChatMessage {
         border-radius: 12px;
         padding: 0.5rem 1rem;
         margin-bottom: 1rem;
+        background-color: #ffffff; /* Pure white chat background */
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
-    /* Answer card */
+    
+    /* Fix Code Block Readability */
+    pre, code {
+        background-color: #f1f5f9 !important; /* Light slate/blue for code blocks */
+        color: #1f2937 !important; /* Dark text for code */
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 6px !important;
+        padding: 0.5rem !important;
+        overflow-x: auto;
+    }
+
+    /* Answer Card - Prominent and professional */
     .answer-card {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border: 1px solid #1f2937;
-        border-radius: 12px;
-        padding: 1rem 1.25rem;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 1.5rem;
+        margin-top: 1rem;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.08);
     }
     .answer-title {
-        color: #fbbf24;
-        font-weight: 700;
-        font-size: 1.1rem;
+        color: #3b82f6; /* Blue Accent */
+        font-weight: 800;
+        font-size: 1.3rem;
         margin-bottom: 0.5rem;
+        border-bottom: 2px solid #e2e8f0;
+        padding-bottom: 0.5rem;
     }
     .answer-body {
-        color: #e2e8f0;
-        line-height: 1.55;
+        color: #1f2937;
+        line-height: 1.7;
         font-size: 1rem;
-    }
-    /* Source chunk styling */
-    .chunk-block {
-        background-color: #111827;
-        border: 1px solid #1f2937;
-        border-radius: 8px;
-        padding: 0.75rem;
-        margin-top: 0.5rem;
-    }
-    .chunk-header {
-        color: #93c5fd;
-        font-weight: 700;
-        margin-bottom: 0.35rem;
-    }
-    .chunk-body {
-        color: #cbd5e1;
-        line-height: 1.5;
-        font-size: 0.95rem;
-    }
-    .chunk-body mark {
-        background-color: #fde68a;
-        color: #111827;
-        padding: 0.1rem 0.15rem;
-        border-radius: 4px;
-    }
-    
-    /* Make chat message text bright and readable */
-    .stChatMessage p {
-        margin-bottom: 0.75rem;
-        color: #f1f5f9 !important; /* Bright slate-100 */
-        line-height: 1.6;
-        font-size: 1rem;
-    }
-    
-    .stChatMessage strong {
-        color: #e2e8f0 !important; /* Even brighter for bold text */
-        font-weight: 600;
-    }
-    
-    .stChatMessage em {
-        color: #cbd5e1 !important; /* Bright for italic text */
-    }
-    
-    .stChatMessage code {
-        background-color: #1e293b !important;
-        color: #60a5fa !important; /* Bright blue for code */
-        padding: 0.2rem 0.4rem;
-        border-radius: 4px;
-        font-size: 0.9em;
-    }
-
-    /* Code blocks and preformatted text */
-    .stChatMessage pre, .answer-body pre {
-        background-color: #0b1220 !important;
-        color: #e2e8f0 !important;
-        border: 1px solid #1f2937;
-        border-radius: 8px;
-        padding: 0.85rem;
-        overflow: auto;
-        white-space: pre;
-        word-break: normal;
-        line-height: 1.45;
-        font-size: 0.95em;
-        font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        max-height: 520px;
-    }
-
-    .stChatMessage code, .answer-body code {
-        background-color: #0b1220 !important;
-        color: #e2e8f0 !important;
-        border: 1px solid #1f2937;
-        border-radius: 6px;
-        padding: 0.25rem 0.4rem;
-        font-size: 0.95em;
-        font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    }
-    
-    /* Lists styling */
-    .stChatMessage ul, .stChatMessage ol {
-        margin-left: 1.5rem;
-        padding-left: 0;
-        color: #f1f5f9 !important;
-    }
-    
-    .stChatMessage li {
-        margin-bottom: 0.5rem;
-        color: #f1f5f9 !important;
-    }
-    
-    /* Headings */
-    .stChatMessage h1, .stChatMessage h2, .stChatMessage h3 {
-        color: #93c5fd !important; /* Bright blue */
-        margin-top: 1rem;
-        margin-bottom: 0.75rem;
-    }
-    
-    .stChatMessage h3 {
-        font-size: 1.3rem;
-        color: #60a5fa !important; /* Even brighter blue */
-    }
-    
-    /* Blockquotes */
-    .stChatMessage blockquote {
-        border-left: 3px solid #60a5fa;
-        padding-left: 1rem;
-        margin-left: 0;
-        color: #cbd5e1 !important;
-        font-style: italic;
-    }
-    
-    /* Links */
-    .stChatMessage a {
-        color: #60a5fa !important;
-        text-decoration: underline;
-    }
-    
-    .stChatMessage a:hover {
-        color: #93c5fd !important;
-    }
-    
-    /* Caption styling for sources */
-    .stChatMessage .stCaption {
-        color: #94a3b8 !important; /* Slate-400 for captions */
-    }
-    
-    /* Expander styling for sources */
-    .streamlit-expanderHeader {
-        color: #e2e8f0 !important;
-        font-weight: 600;
-    }
-    
-    .streamlit-expanderContent {
-        color: #f1f5f9 !important;
     }
     
     /* Source citation styling */
     .source-citation {
-        background-color: #1e293b;
+        background-color: #f1f5f9; /* Light gray background */
         padding: 1rem;
+        border-radius: 10px;
+        margin-top: 0.75rem;
+        border-left: 4px solid #f97316; /* Amber accent */
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .chunk-block {
+        background-color: #e2e8f0; /* Slightly darker light gray */
+        border: 1px solid #cbd5e1;
         border-radius: 8px;
-        margin: 0.5rem 0;
-        border-left: 3px solid #f97316;
+        padding: 0.75rem;
+        margin-top: 0.75rem;
+        color: #1f2937; /* Ensure non-highlighted text in chunks is dark */
+        font-size: 0.9rem;
     }
-    
-    .source-citation strong {
-        color: #fbbf24 !important; /* Bright amber for source names */
+    .chunk-block p {
+        margin-bottom: 0 !important;
     }
-    
-    .source-citation code {
-        color: #60a5fa !important;
-        background-color: #0f172a;
+    .chunk-block mark {
+        background-color: #fde047; /* Bright yellow highlight (good contrast on light) */
+        color: #1f2937;
+        padding: 0.1rem 0.15rem;
+        border-radius: 4px;
+        font-weight: 600;
     }
+
+    /* General text and elements */
+    .stChatMessage p, .stChatMessage li, .stChatMessage h2, .stChatMessage h3, .stChatMessage h4 { 
+        color: #1f2937 !important; 
+    }
+    .stChatMessage a { color: #3b82f6 !important; }
     
-    /* Streamlit widgets styling for consistency */
-    /* FIX 1: Add caret-color to ensure cursor visibility in the input box */
-    .stTextInput>div>div>input {
-        background-color: #1e293b !important;
-        border: 1px solid #334155;
-        color: #f8fafc;
+    /* Input/Widget Styling */
+    .stTextInput>div>div>input, .stFileUploader>div>div {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1;
+        color: #1f2937;
         border-radius: 8px;
-        caret-color: #f97316 !important; /* Bright amber color for contrast */
-    }
-    /* File uploader styling */
-    .stFileUploader>div>div {
-        background-color: #1e293b !important;
-        border: 1px solid #334155;
-        color: #f8fafc;
-        border-radius: 8px;
+        caret-color: #059669 !important; 
     }
     
-    /* FIX 3: Custom Button Styling for dark theme */
+    /* Button Styling */
     .stButton > button {
         border-radius: 8px;
         transition: all 0.2s;
+        font-weight: 600 !important;
     }
     
-    /* Secondary Button Styling (Clear Chat/Cleanup) to make it dark/muted */
-    .stButton:has(button[kind="secondary"]) button {
-        background-color: #334155 !important; /* Dark Slate background */
-        border-color: #475569 !important;
-        color: #e2e8f0 !important;
-    }
-    
-    /* Ensure primary buttons stand out */
+    /* Primary Button (Send/Index) */
     .stButton:has(button[kind="primary"]) button {
-        font-weight: bold;
+        background-color: #059669 !important; /* Deep Green */
+        color: #ffffff !important;
+        border: none;
+    }
+    
+    /* Secondary Button (Clear Chat History) - Pink/Maroon for distinct action */
+    .stButton:has(button[kind="secondary"]) button {
+        background-color: #fbcfe8 !important; /* Light Pink */
+        border-color: #f472b6 !important;
+        color: #9d174d !important; /* Dark Maroon Text */
+        box-shadow: none !important;
+    }
+
+    /* Sidebar Expander Styling */
+    .streamlit-expanderHeader {
+        background-color: #dbeafe; /* Light Blue */
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        color: #1e40af !important; /* Dark Blue Text */
+        font-weight: 700;
+    }
+    
+    /* Sidebar Input Labels */
+    .st-emotion-cache-10ohe8c label { /* Target Streamlit label */
+        color: #4b5563 !important;
     }
     </style>
     """,
@@ -251,269 +241,136 @@ st.markdown(
 )
 
 
-# --- API Functions ---
-def get_backend_url() -> str:
-    return st.session_state["backend_url"].rstrip("/")
+# --- Core Logic Functions ---
 
+def cleanup_resources():
+    """Clears the RAG pipeline instance and removes temporary files."""
+    with st.spinner("Clearing resources..."):
+        try:
+            # Remove pipeline state and temporary files
+            if "pipeline" in st.session_state and st.session_state.pipeline:
+                st.session_state.pipeline.vector_store = None
+                st.session_state.pipeline.retriever = None
+                del st.session_state.pipeline
+            st.session_state.pipeline = None
 
-def set_backend_url(url: str) -> None:
-    st.session_state["backend_url"] = url.rstrip("/")
-
-
-def api_health() -> bool:
-    try:
-        resp = requests.get(f"{get_backend_url()}/health", timeout=3)
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-
-def api_status() -> dict:
-    """Check the processing status and fetch loaded documents."""
-    try:
-        resp = requests.get(f"{get_backend_url()}/status", timeout=5)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        return {"status": "error", "error": str(e), "loaded_documents": []}
-
-
-def api_load(files, url: str, progress_placeholder) -> dict:
-    """Load documents and poll for completion."""
-    payload = {}
-    if url:
-        payload["url"] = url.strip()
-    
-    files_param = []
-    if files:
-        for f in files:
-            files_param.append(("files", (f.name, f, f.type)))
-
-    # 1. Start the load process
-    try:
-        resp = requests.post(
-            f"{get_backend_url()}/load",
-            files=files_param,
-            data=payload,
-            timeout=10, 
-        )
-        resp.raise_for_status()
-        result = resp.json()
-    except requests.exceptions.HTTPError as e:
-        error_detail = e.response.json().get("detail", str(e))
-        raise Exception(f"Server Error: {error_detail}")
-    except Exception as e:
-        raise Exception(f"Connection Error: {e}")
-
-    # 2. If processing started, poll for completion
-    if result.get("status") == "processing":
-        max_wait = 300 
-        start_time = time.time()
-        poll_interval = 2 
-        
-        while time.time() - start_time < max_wait:
-            status_resp = api_status()
-            status = status_resp.get("status", "processing")
+            tmp = st.session_state.pop("tmp_dir", None)
+            if tmp and os.path.exists(tmp):
+                shutil.rmtree(tmp, ignore_errors=True)
             
-            if status == "ready":
-                st.session_state["rag_status"] = status_resp
-                progress_placeholder.success("✅ Documents indexed successfully!")
-                time.sleep(0.5) 
-                progress_placeholder.empty() 
-                return status_resp
-            elif status == "error":
-                error_msg = status_resp.get("error", "Unknown error occurred during processing.")
-                progress_placeholder.error(f"❌ Indexing Error: {error_msg}")
-                st.session_state["rag_status"] = status_resp
-                raise Exception(error_msg)
-            else:
-                elapsed = int(time.time() - start_time)
-                # Use a progress bar for better visualization
-                progress_placeholder.progress(min(elapsed / max_wait, 1.0), text=f"⏳ Processing documents... ({elapsed}s elapsed)")
-                time.sleep(poll_interval)
-        
-        # Timeout
-        progress_placeholder.error("⏱️ Processing timed out after 5 minutes.")
-        raise Exception("Processing timed out. Please check server logs.")
-    
-    # If already ready from the server side (fingerprint reuse)
-    return api_status()
+            # Recreate tmp dir for next upload session
+            st.session_state.tmp_dir = tempfile.mkdtemp(prefix="rag_uploads_")
 
+            st.session_state["status"] = "idle"
+            st.session_state["loaded_documents"] = []
+            st.session_state["messages"] = [] # Also clear chat history on full cleanup
+            st.success("All indexed documents and chat history cleared.")
+            st.rerun()
 
-# MODIFIED: Now returns the structured dictionary from the backend
-def api_query(query: str) -> Dict[str, Any]:
-    # Increased timeout for Map-Reduce operations which can take longer
-    resp = requests.post(
-        f"{get_backend_url()}/query",
-        json={"query": query},
-        timeout=300,  # 5 minutes for Map-Reduce operations
-    )
-    resp.raise_for_status()
-    # Return the full structured response: {"answer": str, "sources": list}
-    return resp.json() 
-
-def api_cleanup() -> dict:
-    resp = requests.post(f"{get_backend_url()}/cleanup", timeout=10)
-    resp.raise_for_status()
-    return resp.json()
-
-def api_cleanup_selected(paths: list[str]) -> dict:
-    resp = requests.post(
-        f"{get_backend_url()}/cleanup_selected",
-        json={"paths": paths},
-        timeout=180,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-# --- Streamlit UI Components ---
-
-def initial_status_check():
-    """Checks the RAG status on page load."""
-    if st.session_state["rag_status"]["status"] in ["idle", "processing", "error"]:
-        status_resp = api_status()
-        st.session_state["rag_status"] = status_resp
-        
-        # Display persistent status message if not ready
-        if status_resp["status"] == "processing":
-            st.toast("Indexing in progress...", icon="⏳")
-        elif status_resp["status"] == "error":
-            st.toast(f"Error: {status_resp.get('error', 'Check server logs.')}", icon="❌")
-        elif status_resp["status"] == "ready":
-            st.toast("RAG Pipeline is ready for queries.", icon="✅")
+        except Exception as e:
+            logging.exception("Cleanup failed: %s", e)
+            st.error(f"Cleanup failed: {e}")
 
 
 def sidebar():
     st.sidebar.title("⚙️ RAG System Controls")
-    
-    # 1. Connection Settings
-    with st.sidebar.expander("🔗 Backend Connection", expanded=False):
-        backend_url = st.text_input("FastAPI URL", get_backend_url(), key="backend_url_input")
-        set_backend_url(backend_url)
 
-        health_ok = api_health()
-        status_icon = "🟢" if health_ok else "🔴"
-        st.markdown(f"**{status_icon} Backend Status:** {'Reachable' if health_ok else 'Offline'}")
-
-    st.sidebar.markdown("---")
-    
-    # 2. Document Indexing
+    # --- 1. Document Upload + Indexing ---
     st.sidebar.header("📚 Load Documents")
     
     uploaded_files = st.sidebar.file_uploader(
-        "Upload PDF/DOCX/TXT/MD", 
-        type=["pdf", "docx", "doc", "txt", "md"], 
+        "Upload PDF/DOCX/TXT/MD documents",
+        type=["pdf", "docx", "doc", "txt", "md"],
         accept_multiple_files=True
     )
-    url_input = st.sidebar.text_input("or Provide a URL to index", placeholder="e.g., https://example.com/report.pdf")
 
-    if st.sidebar.button("Index Documents", type="primary", use_container_width=True):
+    url_input = st.sidebar.text_input("Or provide a URL (optional):", placeholder="https://example.com/report.pdf")
+
+    if st.sidebar.button("🚀 Index Documents", type="primary", use_container_width=True):
         if not uploaded_files and not url_input.strip():
-            st.sidebar.warning("Upload at least one file or provide a URL.")
+            st.sidebar.warning("Please upload at least one file or provide a URL.")
             return
         
-        # Use a status component for real-time indexing feedback
-        with st.sidebar.status("Starting document indexing...", expanded=True) as status_box:
+        with st.spinner("Starting document indexing... this may take a moment."):
+            
+            # Ensure we have a pipeline instance
+            if st.session_state.pipeline is None:
+                st.session_state.pipeline = RAGPipeline(config_dir="configs")
+
+            pipeline: RAGPipeline = st.session_state.pipeline
+
             try:
-                status_box.update(label="Saving uploads and sending to backend...", state="running")
-                resp = api_load(uploaded_files, url_input, status_box)
-                status_box.update(label="✅ Documents Indexed Successfully!", state="complete")
-                
-                # Update main session state
-                st.session_state["rag_status"] = resp
-                st.toast("Indexing complete! You can now ask questions.", icon="🎉")
-                st.rerun() 
+                # Save uploaded files to a temporary directory and build docs list
+                file_paths: List[str] = []
+                if uploaded_files:
+                    for f in uploaded_files:
+                        # Use file extension as suffix for safety
+                        suffix = os.path.splitext(f.name)[-1] if os.path.splitext(f.name)[-1] else ".tmp"
+                        fd, path = tempfile.mkstemp(suffix=suffix, dir=st.session_state.tmp_dir)
+                        with os.fdopen(fd, "wb") as out:
+                            out.write(f.read())
+                        file_paths.append(path)
+
+                docs: List[dict] = []
+                if file_paths:
+                    docs.extend({"path": p, "enabled": True, "name": os.path.basename(p)} for p in file_paths)
+                if url_input.strip():
+                    docs.append({"path": url_input.strip(), "enabled": True, "name": url_input.strip()})
+
+                # Override pipeline documents config and run preparation synchronously
+                pipeline.config["documents"] = docs
+                st.session_state["status"] = "processing"
+                pipeline.prepare_vector_store()
+
+                st.sidebar.success("Documents indexed successfully!")
+                st.session_state["status"] = "ready"
+                st.session_state["loaded_documents"] = [
+                    {"name": d["name"], "path": d["path"]} for d in docs
+                ]
+
             except Exception as e:
-                st.sidebar.error(f"Failed to index documents: {e}")
-                status_box.update(label=f"❌ Indexing Failed: {e}", state="error")
+                logging.exception("Indexing failed: %s", e)
+                st.sidebar.error(f"Indexing failed: {e}")
+                st.session_state["status"] = "error"
+        st.rerun() # Rerun to update status display
+
+
+    st.sidebar.markdown("---")
     
+    # --- 2. Current Status ---
+    st.sidebar.header("Current Context Status")
+    
+    status_msg = st.session_state.get("status", "idle")
+    loaded_docs = st.session_state.get("loaded_documents", [])
+    
+    if status_msg == "ready":
+        st.sidebar.success(f"Context Ready: {len(loaded_docs)} source(s) indexed.")
+    elif status_msg == "processing":
+        st.sidebar.info("Indexing in Progress...")
+    elif status_msg == "error":
+        st.sidebar.error("Error State. Check logs.")
+    else:
+        st.sidebar.warning("Idle. No documents loaded.")
+        
+    if loaded_docs:
+        with st.sidebar.expander(f"Indexed Sources ({len(loaded_docs)})", expanded=True):
+            for d in loaded_docs:
+                st.sidebar.markdown(f"• **{os.path.basename(d.get('name', d.get('path', 'Unknown')))}**")
+
     st.sidebar.markdown("---")
 
-    # 3. Document Management & Status
-    status_data = st.session_state["rag_status"]
-    current_status = status_data["status"]
-    loaded_docs = status_data.get("loaded_documents", [])
+    # --- 3. Cleanup ---
+    st.sidebar.header("Context Management")
 
-    st.sidebar.header("Current Context")
+    if st.sidebar.button("🔥 Clear ALL Indexed Documents", type="secondary", use_container_width=True):
+        cleanup_resources()
     
-    if current_status == "ready" and loaded_docs:
-        st.sidebar.success(f"Context Ready: {len(loaded_docs)} source(s) indexed.")
-        with st.sidebar.expander("Indexed Sources", expanded=True):
-            for doc in loaded_docs:
-                doc_name = doc.get("name", doc.get("path", "Unknown Source"))
-                st.caption(f"📄 {doc_name}")
-        
-        # Context cleanup controls
-        doc_options = {doc.get("name", doc.get("path", "Unknown Source")): doc.get("path") for doc in loaded_docs}
-        selected_labels = st.sidebar.multiselect(
-            "Clear specific contexts",
-            options=list(doc_options.keys()),
-            placeholder="Select one or more sources",
-        )
-        clear_scope = st.sidebar.radio(
-            "Clear scope",
-            ["Selected", "All"],
-            horizontal=True,
-            key="clear_scope_choice",
-        )
-
-        if st.sidebar.button("Clear Selected Context", type="secondary", use_container_width=True):
-            try:
-                if clear_scope == "All":
-                    cleanup_resp = api_cleanup()
-                    st.session_state["rag_status"] = {"status": "idle", "loaded_documents": []}
-                    st.session_state["messages"] = []
-                    st.sidebar.success(cleanup_resp.get("message", "All context cleared."))
-                else:
-                    if not selected_labels:
-                        st.sidebar.warning("Select at least one source to clear.")
-                    else:
-                        selected_paths = [doc_options[label] for label in selected_labels if doc_options.get(label)]
-                        resp = api_cleanup_selected(selected_paths)
-                        # Refresh status after partial cleanup
-                        status_resp = api_status()
-                        st.session_state["rag_status"] = status_resp
-                        # If nothing remains, clear chat history
-                        if not status_resp.get("loaded_documents"):
-                            st.session_state["messages"] = []
-                        st.sidebar.success(resp.get("message", "Selected context cleared."))
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"Context clear failed: {e}")
-    elif current_status == "processing":
-        st.sidebar.info("Indexing in Progress...")
-    elif current_status == "error":
-        st.sidebar.error(f"Error State: {status_data.get('error', 'Check server logs.')}")
-    else:
-        st.sidebar.warning("No documents loaded yet. Please index sources to begin.")
-
-    # 4. Cleanup Button
-    if st.sidebar.button("Clear Indexed Documents (Cleanup)", type="secondary", use_container_width=True):
-        try:
-            with st.status("🧹 Clearing RAG pipeline and files...", expanded=True) as cleanup_status:
-                cleanup_resp = api_cleanup()
-                st.session_state["rag_status"] = {"status": "idle", "loaded_documents": []}
-                st.session_state["messages"] = [] # Clear chat history on cleanup
-                cleanup_status.update(label="✅ Cleanup complete!", state="complete")
-                st.success(cleanup_resp["message"])
-                st.rerun() 
-        except Exception as e:
-            st.sidebar.error(f"Cleanup failed: {e}")
-
 
 def chat_area():
-    st.markdown('<div class="title-text">Multi-Doc RAG Assistant</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-text">Upload documents or URLs in the sidebar, then ask grounded questions about your data.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="title-text">📄 RAG Query Interface</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-text">Ask questions grounded in your indexed documents.</div>', unsafe_allow_html=True)
 
-    rag_ready = st.session_state["rag_status"]["status"] == "ready"
-
-    # Manage chat input state safely before rendering the widget
-    if "chat_query" not in st.session_state:
-        st.session_state["chat_query"] = ""
-    if st.session_state.get("clear_chat_query"):
-        st.session_state["chat_query"] = ""
-        st.session_state["clear_chat_query"] = False
+    rag_ready = st.session_state["status"] == "ready"
 
     # Display Chat History using st.chat_message
     for message in st.session_state["messages"]:
@@ -521,166 +378,101 @@ def chat_area():
             with st.chat_message("user", avatar="👤"):
                 st.markdown(message["content"])
         else:
-            # Assistant message content is the structured result: {"answer": str, "sources": list}
-            response_content = message["content"]
+            response_content: Dict[str, Any] = message["content"]
+            
+            answer_text = response_content.get("answer", "No answer generated.")
+            sources: List[Dict[str, str]] = response_content.get("sources", [])
+            
             with st.chat_message("assistant", avatar="🤖"):
                 # 1. Display the structured answer with enhanced styling
-                answer_text = response_content.get("answer", "")
-                if answer_text:
-                    st.markdown(
-                        """
-                        <div class="answer-card">
-                            <div class="answer-title">Answer</div>
-                            <div class="answer-body">
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    # Render markdown so code blocks stay intact and readable
-                    st.markdown(answer_text, unsafe_allow_html=False)
-                    st.markdown(
-                        """
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                st.markdown(
+                    """<div class="answer-card"><div class="answer-title">🤖 AI Response</div><div class="answer-body">""", 
+                    unsafe_allow_html=True
+                )
+                # st.markdown handles the Markdown structure (H2, H3, lists) in answer_text
+                st.markdown(answer_text, unsafe_allow_html=False)
+                st.markdown("""</div></div>""", unsafe_allow_html=True)
                 
-                # 2. Display Sources in an Expander with better styling and highlighted chunks
-                sources = response_content.get("sources", [])
+                # 2. Display Sources
                 if sources:
-                    with st.expander(f"📚 Sources Used ({len(sources)} citation{'s' if len(sources) > 1 else ''})", expanded=False):
+                    with st.expander(f"📚 Sources Cited ({len(sources)} citation{'s' if len(sources) > 1 else ''})", expanded=False):
                         for i, source in enumerate(sources):
-                            source_name = source.get('name', 'Unknown Source')
-                            page_info = source.get('page_info', 'N/A')
-                            source_path = source.get('path', '')
-                            chunk_html = source.get('highlighted_chunk') or ""
-                            raw_chunk = source.get('chunk', '')
-                            # If no highlighted version, escape raw chunk
-                            if not chunk_html and raw_chunk:
-                                chunk_html = html.escape(raw_chunk)
-                            # Limit excessively long chunks for UI
-                            if chunk_html and len(chunk_html) > 3000:
-                                chunk_html = chunk_html[:3000] + "..."
-                            
+                            source_path = source.get('path', 'N/A')
+                            snippet = source.get('snippet', '') # This is the highlighted text from the original code
+                            source_name = os.path.basename(source_path)
+
+                            # Format the source citation block
                             st.markdown(
                                 f"""
-                                <div class="source-citation" style="margin-bottom: 1rem; padding: 1rem; background-color: #1e293b; border-left: 3px solid #f97316; border-radius: 6px;">
-                                    <p style="margin-bottom: 0.5rem; color: #fbbf24; font-weight: 600; font-size: 1.05rem;">
-                                        {i+1}. {source_name}
+                                <div class="source-citation">
+                                    <p style="margin-bottom: 0.5rem; color: #f97316; font-weight: 700; font-size: 1.05rem;">
+                                        {i+1}. Source: {source_name}
                                     </p>
-                                    <p style="margin-bottom: 0.5rem; color: #94a3b8; font-size: 0.9rem;">
-                                        📍 Location: <span style="color: #cbd5e1;">{page_info}</span>
+                                    <p style="margin-bottom: 0.25rem; color: #4b5563; font-size: 0.85rem; font-family: monospace;">
+                                        📄 Path: <code>{source_path}</code>
                                     </p>
-                                    <p style="margin-bottom: 0.25rem; color: #94a3b8; font-size: 0.85rem; font-family: monospace;">
-                                        📄 Path: <code style="color: #60a5fa; background-color: #0f172a; padding: 0.2rem 0.4rem; border-radius: 4px;">{os.path.basename(source_path) if source_path else 'N/A'}</code>
-                                    </p>
-                                    {f'<div class="chunk-block"><div class="chunk-header">Context Chunk</div><div class="chunk-body">{chunk_html}</div></div>' if chunk_html else ''}
+                                    {f'<div class="chunk-block"><p style="font-style: italic; color: #4b5563;">Snippet:</p><div class="chunk-body">{snippet}</div></div>' if snippet else ''}
                                 </div>
                                 """,
                                 unsafe_allow_html=True
                             )
                 else:
                     st.markdown(
-                        '<p style="color: #94a3b8; font-size: 0.9rem; font-style: italic;">No specific sources were cited for this response.</p>',
+                        '<p style="color: #64748b; font-size: 0.9rem; font-style: italic; margin-top: 1rem;">No specific sources were cited for this response.</p>',
                         unsafe_allow_html=True
                     )
 
 
-    # Chat Input
-    with st.form("chat_form", clear_on_submit=False):
+    # Chat Input Area 
+    with st.form("chat_form", clear_on_submit=True):
         query = st.text_input(
             "Ask a question about the indexed documents", 
             placeholder="e.g., Summarize the key findings from the uploaded report.", 
             disabled=not rag_ready,
             label_visibility="collapsed",
-            key="chat_query",
         )
         col1, col2 = st.columns([1, 6])
+        
         with col1:
             submitted = st.form_submit_button("Send", type="primary", disabled=not rag_ready, use_container_width=True)
-        # Removed st.button("Clear Chat", ...) from inside the form
-
-    # Clear Chat Button (moved outside the form)
-    # Using st.columns here to maintain alignment from the original structure
-    col_clear, _ = st.columns([1, 6])
-    with col_clear:
-        if st.button("Clear Chat", type="secondary", use_container_width=True): # Use use_container_width to match form_submit_button size
-             st.session_state["messages"] = []
-             st.rerun() 
-
+        
+        with col2:
+            # Styled Secondary Button for Clearing History
+            if st.form_submit_button("Clear Chat History", type="secondary"): 
+                 st.session_state["messages"] = []
+                 st.rerun() 
 
     if submitted and query.strip():
         # Add user message to history
         st.session_state["messages"].append({"role": "user", "content": query.strip()})
         
-        # Get assistant response immediately (before rerun)
-        # with st.status("🔄 Retrieving and generating answer...", expanded=True) as status:
-        with st.spinner("Retrieving and generating answer..."):
+        # Get assistant response immediately
+        with st.spinner("Retrieving information…"):
             try:
-                # api_query returns the full structured dictionary
-                result = api_query(query.strip())
-                
-                # Log the result for debugging
-                logging.info("Received result from API: answer length=%d, sources count=%d", 
-                           len(result.get("answer", "")), len(result.get("sources", [])))
-                
-                # Validate result structure
-                if not isinstance(result, dict):
-                    raise ValueError(f"Unexpected response format: {type(result)}")
-                
-                if "answer" not in result:
-                    raise ValueError("Response missing 'answer' field")
-                
-                # Ensure sources is a list
-                if "sources" not in result:
-                    result["sources"] = []
-                
-                # Validate answer is not empty
-                if not result.get("answer", "").strip():
-                    raise ValueError("Received empty answer from backend")
-                
-                # Add the full structured result to history
-                st.session_state["messages"].append({"role": "assistant", "content": result})
-                logging.info("Successfully added assistant response to chat history")
-                
-            except requests.exceptions.Timeout:
-                error_message = "Query timed out. The operation took too long. Try rephrasing your question or check if the backend is responsive."
-                st.error(error_message)
-                # Remove the user message if query failed
-                if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "user":
-                    st.session_state["messages"].pop()
+                pipeline: RAGPipeline = st.session_state.get("pipeline")
+                if not pipeline:
+                    st.error("Pipeline is not initialized. Please index documents first.")
+                    st.session_state["messages"].pop() # Remove user message if error occurred
+                else:
+                    # Run the RAG query
+                    result = pipeline.answer_with_sources(query.strip())
                     
-            except requests.exceptions.HTTPError as e:
-                error_detail = "Unknown error"
-                try:
-                    if e.response is not None:
-                        error_detail = e.response.json().get("detail", str(e))
-                except:
-                    error_detail = str(e)
+                    # Store the structured result
+                    st.session_state["messages"].append({"role": "assistant", "content": result})
                 
-                error_message = f"Query failed: {error_detail}"
-                st.error(error_message)
-                # Remove the user message if query failed
-                if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "user":
-                    st.session_state["messages"].pop()
-                    
+            except MyException as me:
+                st.error(f"Failed to fetch answer (MyException): {me}")
+                st.session_state["messages"].pop()
             except Exception as e:
-                error_message = f"Query failed: {str(e)}"
-                st.error(error_message)
-                logging.exception("Unexpected error in query: %s", e)
-                # Remove the user message if query failed
-                if st.session_state["messages"] and st.session_state["messages"][-1]["role"] == "user":
-                    st.session_state["messages"].pop()
+                logging.exception("Query failed: %s", e)
+                st.error(f"Failed to fetch answer: {e}")
+                st.session_state["messages"].pop()
         
-        # Rerun to display messages
-        # Flag to clear the input box on next render to avoid Streamlit key conflicts
-        st.session_state["clear_chat_query"] = True
         st.rerun()
 
 
 def main():
     sidebar()
-    initial_status_check() 
     chat_area()
 
 

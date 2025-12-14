@@ -216,5 +216,8 @@ logs/
 retriever_test.py
 test.py
 test.ipynb
-notebook/
 ui_app.py
+streamlit_app_with_backend.py
+streamlit_app_without_backend.py
+notebook
+template.py
