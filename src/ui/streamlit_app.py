@@ -75,8 +75,8 @@ Based on the indexed context, the information provided above is grounded and val
 
 # --- Configuration and Initial Setup ---
 st.set_page_config(
-    page_title="Simple RAG App",
-    page_icon="📄",
+    page_title="Q&A RAG App by Jeet Majumder",
+    page_icon="static/images/favicon.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -92,6 +92,8 @@ if "messages" not in st.session_state:
     st.session_state["messages"] = []
 if "tmp_dir" not in st.session_state:
     st.session_state.tmp_dir = tempfile.mkdtemp(prefix="rag_uploads_")
+if "pending_query" not in st.session_state:
+    st.session_state["pending_query"] = None
 
 # Set up logging to avoid verbose output in Streamlit
 logging.basicConfig(level=logging.WARNING)
@@ -108,8 +110,8 @@ st.markdown(
     .title-text { 
         font-size: 2.8rem; 
         font-weight: 900; 
-        color: #059669; /* Deep Green accent */
-        text-shadow: 0 0 5px rgba(5, 150, 105, 0.2);
+        color: #3b3b3d;
+        text-shadow: 0 0 10px rgba(59, 130, 246, 0.1);
     } 
     .sub-text { color: #64748b; margin-bottom: 2rem; font-size: 1.1rem; } 
     
@@ -145,7 +147,7 @@ st.markdown(
         color: #3b82f6; /* Blue Accent */
         font-weight: 800;
         font-size: 1.3rem;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.75rem;
         border-bottom: 2px solid #e2e8f0;
         padding-bottom: 0.5rem;
     }
@@ -234,6 +236,14 @@ st.markdown(
     /* Sidebar Input Labels */
     .st-emotion-cache-10ohe8c label { /* Target Streamlit label */
         color: #4b5563 !important;
+    }
+
+    /* FIX 1: Sidebar long text wrapping/breaking inside expander */
+    .stSidebar .streamlit-expanderContent div[data-testid^="stMarkdownContainer"] p, 
+    .stSidebar .streamlit-expanderContent div[data-testid^="stMarkdownContainer"] strong {
+        word-wrap: break-word;
+        word-break: break-word;
+        overflow-wrap: break-word;
     }
     </style>
     """,
@@ -355,7 +365,8 @@ def sidebar():
     if loaded_docs:
         with st.sidebar.expander(f"Indexed Sources ({len(loaded_docs)})", expanded=True):
             for d in loaded_docs:
-                st.sidebar.markdown(f"• **{os.path.basename(d.get('name', d.get('path', 'Unknown')))}**")
+                doc_name = d.get("name", d.get("path", "Unknown Source"))
+                st.caption(f"📃 {doc_name}")
 
     st.sidebar.markdown("---")
 
@@ -367,7 +378,7 @@ def sidebar():
     
 
 def chat_area():
-    st.markdown('<div class="title-text">📄 RAG Query Interface</div>', unsafe_allow_html=True)
+    st.markdown('<div class="title-text">🪐 Multi-Doc RAG Q&A Interface</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-text">Ask questions grounded in your indexed documents.</div>', unsafe_allow_html=True)
 
     rag_ready = st.session_state["status"] == "ready"
@@ -441,33 +452,44 @@ def chat_area():
             if st.form_submit_button("Clear Chat History", type="secondary"): 
                  st.session_state["messages"] = []
                  st.rerun() 
-
-    if submitted and query.strip():
-        # Add user message to history
-        st.session_state["messages"].append({"role": "user", "content": query.strip()})
         
-        # Get assistant response immediately
-        with st.spinner("Retrieving information…"):
+        # FIX 2: Store query and force rerun to display user message immediately
+        if submitted and query.strip():
+            st.session_state["messages"].append({"role": "user", "content": query.strip()})
+            st.session_state["pending_query"] = query.strip()
+            st.rerun()
+
+
+    # FIX 2: Process the query in a separate block after the initial rerun
+    if st.session_state["pending_query"]:
+        query_to_process = st.session_state["pending_query"]
+        
+        # This spinner blocks the thread while the LLM processes, but the previous rerun
+        # ensures the user's message is already visible in the chat history.
+        with st.spinner(f"Retrieving information for: \"{query_to_process}\"…"):
             try:
                 pipeline: RAGPipeline = st.session_state.get("pipeline")
+                
                 if not pipeline:
-                    st.error("Pipeline is not initialized. Please index documents first.")
-                    st.session_state["messages"].pop() # Remove user message if error occurred
+                    error_result = {"answer": "Error: Pipeline is not initialized. Please index documents first.", "sources": []}
+                    st.session_state["messages"].append({"role": "assistant", "content": error_result})
                 else:
                     # Run the RAG query
-                    result = pipeline.answer_with_sources(query.strip())
+                    result = pipeline.answer_with_sources(query_to_process)
                     
                     # Store the structured result
                     st.session_state["messages"].append({"role": "assistant", "content": result})
                 
             except MyException as me:
-                st.error(f"Failed to fetch answer (MyException): {me}")
-                st.session_state["messages"].pop()
+                error_result = {"answer": f"Failed to fetch answer (MyException): {me}", "sources": []}
+                st.session_state["messages"].append({"role": "assistant", "content": error_result})
             except Exception as e:
                 logging.exception("Query failed: %s", e)
-                st.error(f"Failed to fetch answer: {e}")
-                st.session_state["messages"].pop()
-        
+                error_result = {"answer": f"Failed to fetch answer: {e}", "sources": []}
+                st.session_state["messages"].append({"role": "assistant", "content": error_result})
+
+        # Cleanup and final rerun to update the chat history with the response/error
+        st.session_state["pending_query"] = None
         st.rerun()
 
 
