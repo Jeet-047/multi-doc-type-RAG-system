@@ -221,3 +221,5 @@ streamlit_app_with_backend.py
 streamlit_app_without_backend.py
 notebook
 template.py
+credentials.txt
+flowchart/

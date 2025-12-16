@@ -223,27 +223,43 @@ class RAGPipeline:
         logging.info("Using Map-Reduce strategy with %d docs", len(docs))
         
         # Map: process each document individually (without citations in context)
-        for idx, doc in enumerate(docs, 1):
-            ctx = doc.page_content  # Use clean content without citations
-            map_user_prompt = map_tpl.format(
-                context=ctx,
-                question=query
-            )
+
+        # Build the whole chunks context
+        context_str = build_context(docs, include_citations=False)
+        logging.info("Total context length for Map-Reduce: %d characters", len(context_str))
+        # Map: process all doc together
+        map_user_prompt = map_tpl.format(
+            context=context_str,
+            question=query
+        )
+        map_messages = [
+            SystemMessage(content=prompts.SYSTEM_PROMPT),
+            HumanMessage(content=map_user_prompt)
+        ]
+        res = self.llm.invoke(map_messages)
+        map_res = getattr(res, "content", str(res))
+        # for idx, doc in enumerate(docs, 1):
+        #     ctx = doc.page_content  # Use clean content without citations
+        #     map_user_prompt = map_tpl.format(
+        #         context=ctx,
+        #         question=query
+        #     )
             
-            map_messages = [
-                SystemMessage(content=prompts.SYSTEM_PROMPT),
-                HumanMessage(content=map_user_prompt)
-            ]
+        #     map_messages = [
+        #         SystemMessage(content=prompts.SYSTEM_PROMPT),
+        #         HumanMessage(content=map_user_prompt)
+        #     ]
             
-            res = self.llm.invoke(map_messages)
-            map_output = getattr(res, "content", str(res))
-            map_outputs.append(map_output)
-            logging.debug("Map output %d/%d: %d chars", idx, len(docs), len(map_output))
+        #     res = self.llm.invoke(map_messages)
+        #     map_output = getattr(res, "content", str(res))
+        #     map_outputs.append(map_output)
+        #     logging.debug("Map output %d/%d: %d chars", idx, len(docs), len(map_output))
 
         # Reduce: combine all map outputs
         reduce_tpl = prompts.build_reduce_prompt()
         reduce_user_prompt = reduce_tpl.format(
-            map_summaries="\n\n".join(map_outputs),
+            # map_summaries="\n\n".join(map_outputs),
+            map_summaries=map_res,
             question=query,
         )
         

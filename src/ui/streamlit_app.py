@@ -1,5 +1,6 @@
 import streamlit as st
 import tempfile
+import uuid
 import os
 import shutil
 import logging
@@ -37,31 +38,31 @@ except ImportError:
             
             # --- STRUCTURED MARKDOWN RESPONSE (as requested) ---
             markdown_answer = f"""
-## Detailed Analysis for Query: {query}
+            ## Detailed Analysis for Query: {query}
 
-The RAG model has processed your request and generated the following comprehensive response based on the indexed documents.
+            The RAG model has processed your request and generated the following comprehensive response based on the indexed documents.
 
-### **1. Key Summary Points**
+            ### **1. Key Summary Points**
 
-* The **Vector Store** is the core component, responsible for managing high-dimensional vector embeddings.
-* **Document Processing** involves chunking, cleaning, and metadata extraction before the final embedding step.
-* The system supports retrieval from PDF, DOCX, TXT, and URL sources, ensuring broad compatibility.
-* All data handling adheres to the configured security protocols (e.g., encryption at rest).
+            * The **Vector Store** is the core component, responsible for managing high-dimensional vector embeddings.
+            * **Document Processing** involves chunking, cleaning, and metadata extraction before the final embedding step.
+            * The system supports retrieval from PDF, DOCX, TXT, and URL sources, ensuring broad compatibility.
+            * All data handling adheres to the configured security protocols (e.g., encryption at rest).
 
-### **2. Retrieval Strategy**
+            ### **2. Retrieval Strategy**
 
-The system employs a Hybrid Retrieval strategy:
+            The system employs a Hybrid Retrieval strategy:
 
-1.  **Semantic Search:** Uses the query vector to find the most relevant document chunks based on meaning.
-2.  **Keyword Matching:** Supplements semantic search by identifying exact keyword matches for highly specific queries.
+            1.  **Semantic Search:** Uses the query vector to find the most relevant document chunks based on meaning.
+            2.  **Keyword Matching:** Supplements semantic search by identifying exact keyword matches for highly specific queries.
 
-This combined approach maximizes both relevance and precision.
+            This combined approach maximizes both relevance and precision.
 
-### **3. Conclusion**
+            ### **3. Conclusion**
 
-Based on the indexed context, the information provided above is grounded and validated against the original sources.
+            Based on the indexed context, the information provided above is grounded and validated against the original sources.
 
-"""
+            """
             return {
                 "answer": markdown_answer,
                 "sources": [
@@ -282,6 +283,19 @@ def cleanup_resources():
             st.error(f"Cleanup failed: {e}")
 
 
+def display_name_from_path(p: str) -> str:
+    """Return a human-friendly name for a path or URL, removing a UUID prefix if present.
+
+    If the basename is prefixed with a 32-character UUID hex and an underscore,
+    the function strips that prefix and returns the original filename.
+    """
+    b = os.path.basename(p)
+    parts = b.split("_", 1)
+    if len(parts) == 2 and len(parts[0]) == 32:
+        return parts[1]
+    return b
+
+
 def sidebar():
     st.sidebar.title("⚙️ RAG System Controls")
 
@@ -314,16 +328,17 @@ def sidebar():
                 file_paths: List[str] = []
                 if uploaded_files:
                     for f in uploaded_files:
-                        # Use file extension as suffix for safety
-                        suffix = os.path.splitext(f.name)[-1] if os.path.splitext(f.name)[-1] else ".tmp"
-                        fd, path = tempfile.mkstemp(suffix=suffix, dir=st.session_state.tmp_dir)
-                        with os.fdopen(fd, "wb") as out:
+                        # Preserve original filename but make it unique by prefixing a UUID
+                        basename = os.path.basename(f.name)
+                        path = os.path.join(st.session_state.tmp_dir, f"{uuid.uuid4().hex}_{basename}")
+                        with open(path, "wb") as out:
                             out.write(f.read())
                         file_paths.append(path)
 
                 docs: List[dict] = []
                 if file_paths:
-                    docs.extend({"path": p, "enabled": True, "name": os.path.basename(p)} for p in file_paths)
+                    # Use the original filename for display by removing the UUID prefix when present
+                    docs.extend({"path": p, "enabled": True, "name": display_name_from_path(p)} for p in file_paths)
                 if url_input.strip():
                     docs.append({"path": url_input.strip(), "enabled": True, "name": url_input.strip()})
 
@@ -409,8 +424,9 @@ def chat_area():
                     with st.expander(f"📚 Sources Cited ({len(sources)} citation{'s' if len(sources) > 1 else ''})", expanded=False):
                         for i, source in enumerate(sources):
                             source_path = source.get('path', 'N/A')
+                            page_number = source.get('page_info')
                             snippet = source.get('snippet', '') # This is the highlighted text from the original code
-                            source_name = os.path.basename(source_path)
+                            source_name = display_name_from_path(source_path)
 
                             # Format the source citation block
                             st.markdown(
@@ -419,8 +435,11 @@ def chat_area():
                                     <p style="margin-bottom: 0.5rem; color: #f97316; font-weight: 700; font-size: 1.05rem;">
                                         {i+1}. Source: {source_name}
                                     </p>
+                                    <p style="margin-bottom: 0.5rem; color: #94a3b8; font-size: 0.9rem;">
+                                        📍 Location: <span style="color: #434547;">{page_number}</span>
+                                    </p>
                                     <p style="margin-bottom: 0.25rem; color: #4b5563; font-size: 0.85rem; font-family: monospace;">
-                                        📄 Path: <code>{source_path}</code>
+                                        📄 Path: <code>{source_name}</code>
                                     </p>
                                     {f'<div class="chunk-block"><p style="font-style: italic; color: #4b5563;">Snippet:</p><div class="chunk-body">{snippet}</div></div>' if snippet else ''}
                                 </div>
