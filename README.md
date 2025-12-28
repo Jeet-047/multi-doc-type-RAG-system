@@ -110,9 +110,9 @@ This balances:
 
 ### 4️⃣ Embeddings & Vector Store
 
-* **Embedding model:** HuggingFace Sentence Transformers
+* **Embedding model:** Google DeepMind's Gemma 3 architecture based
 
-  (e.g. `all-mpnet-base-v2`)
+  (e.g. `embeddinggemma`)
 * **Vector store:** FAISS
 
 Each chunk is embedded and stored for fast similarity search.
